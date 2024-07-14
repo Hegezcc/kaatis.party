@@ -6,9 +6,22 @@ const videoExtensions = ['mp4', 'webm', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'
 const audioExtensions = ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'wma', 'aiff'];
 
 let mediaOpened = 0;
+const debounceTime = 300;
 const globalKeywords = {};
+const globalUsernames = {};
+const searchTrees = {
+    keywordStart: {},
+    keywordEnd: {},
+    usernameStart: {},
+    usernameEnd: {},
+};
+
 let creatingMedia = false;
 let mediaElements = [];
+let searchQuery = null;
+let globalMediaElements = [];
+let debounceTimeout = null;
+
 
 const extractType = (path) => {
     // Get the extension
@@ -29,6 +42,181 @@ const extractType = (path) => {
         return 'unknown';
     }
 };
+
+const alphanum = (s) => s.toLowerCase()
+    .normalize('NFD')
+    .replace(/[^a-zA-Z0-9]/g, '-')
+    .split('-')
+    .filter((x) => x !== '')
+
+const search = (query) => {
+    if (query === '') {
+        // Empty query, return all media
+        return globalMediaElements;
+    }
+
+    // Normalize the query into parts
+    const searchParts = alphanum(query.toLowerCase());
+    const results = [];
+
+    console.log('Searching for:', searchParts)
+
+
+    // Search for each part from keywords and usernames lists from beginning of each item and end of each item
+    searchParts.forEach((part) => {
+        // Direct matches
+        let currentResults = globalKeywords[part];
+        if (currentResults !== undefined) {
+            results.push(...currentResults);
+            console.log('Direct keyword match:', part, currentResults)
+        }
+
+        currentResults = globalUsernames[part];
+        if (currentResults !== undefined) {
+            results.push(...currentResults);
+            console.log('Direct username match:', part, currentResults)
+        }
+
+        // Search trees
+        currentResults = searchTree(part, searchTrees.keywordStart, searchTrees.keywordEnd, globalKeywords);
+        results.push(
+            ...currentResults.reduce((ids, item) => [...ids, ...globalKeywords[item]], [])
+        );
+
+        console.log('Keyword tree search:', part, currentResults);
+
+        currentResults = searchTree(part, searchTrees.usernameStart, searchTrees.usernameEnd, globalUsernames);
+        results.push(
+            ...currentResults.reduce((ids, item) => [...ids, ...globalUsernames[item]], [])
+        );
+
+        console.log('Username tree search:', part, currentResults);
+    });
+
+    return results
+        .filter((item, index) => results.indexOf(item) === index)
+        .map(index => globalMediaElements[index]);
+}
+
+const addToSearchTrees = (keyword, startTree, endTree) => {
+    for (let i = 0; i < keyword.length; i++) {
+        const letter = keyword[i];
+        if (startTree[letter] === undefined) {
+            startTree[letter] = {};
+        }
+
+        startTree = startTree[letter];
+    }
+
+    for (let i = keyword.length - 1; i >= 0; i--) {
+        const letter = keyword[i];
+        if (endTree[letter] === undefined) {
+            endTree[letter] = {};
+        }
+
+        endTree = endTree[letter];
+    }
+}
+
+const debounce = (func, wait) => {
+    // Debounce function to prevent multiple calls in short time
+    // Use like:
+    // const debouncedFunction = debounce(function, 300);
+    // debouncedFunction();
+ 
+    return function() {
+        const context = this;
+        const args = arguments;
+
+        clearTimeout(debounceTimeout);
+        debounceTimeout = setTimeout(() => func.apply(context, args), wait);
+    }
+}
+
+const exhaustTree = (prefix, tree, targetMap, direction) => {
+    // Recursive function to return all the keys of targetMap that match the tree with given prefix
+    // For example, when prefix = "kaatis" and tree contains leafs for "kaatis", "kaatistest" "kaatisparty", all of those are returned as list
+    // Direction is either "start" or "end" to determine which end to add to the prefix
+    let currentTree = tree;
+    const results = [];
+
+    while (true) {
+        if (targetMap.hasOwnProperty(prefix)) {
+            results.push(prefix);
+        }
+
+        const length = Object.keys(tree).length;
+
+        if (length === 1) {
+            // Single leaf
+            const letter = Object.keys(tree)[0];
+            if (direction === 'start') {
+                prefix = prefix + letter;
+            } else {
+                prefix = letter + prefix;
+            }
+
+            tree = tree[letter];
+            continue;
+        } else if (length === 0) {
+            // End of tree
+            break;
+        } else {
+            // Multiple leaves, recurse
+            for (const letter in tree) {
+                let leafPrefix;
+                if (direction === 'start') {
+                    leafPrefix = prefix + letter;
+                } else {
+                    leafPrefix = letter + prefix;
+                }
+                results.push(...exhaustTree(leafPrefix, tree[letter], targetMap, direction));
+            }
+            break;
+        }
+    }
+
+    // Ensure result uniqueness
+    return results.filter((item, index) => results.indexOf(item) === index);
+}
+
+const searchTree = (keyword, startTree, endTree, targetMap) => {
+    // Results are the keys matched to targetMap
+    const results = [];
+    let currentTree = startTree;
+    let i = 0;
+    for (i = 0; i < keyword.length; i++) {
+        const letter = keyword[i];
+        if (currentTree[letter] === undefined) {
+            break;
+        } else {
+            currentTree = currentTree[letter];
+        }
+    }
+
+    if (i === keyword.length) {
+        // Add all matching results from the tree to the results
+        results.push(...exhaustTree(keyword, currentTree, targetMap, 'start'));
+    }
+
+    currentTree = endTree;
+    for (i = keyword.length - 1; i >= 0; i--) {
+        const letter = keyword[i];
+        if (currentTree[letter] === undefined) {
+            break;
+        } else {
+            currentTree = currentTree[letter];
+        }
+    }
+
+    if (i === -1) {
+        // Add all matching results from the tree to the results
+        results.push(...exhaustTree(keyword, currentTree, targetMap, 'end'));
+    }
+
+    return results;
+}
+
 
 // Function code from here: https://stackoverflow.com/a/14991797 with CC BY-SA 4.0 license
 function parseCSV(str) {
@@ -98,10 +286,9 @@ const getMedia = async () => {
     // Parse the CSV file
     const csv = parseCSV(response).reverse();
 
-    console.log(csv)
+    // console.log(csv)
 
-    const media = [];
-    csv.forEach((row, index) => {
+    csv.forEach((row) => {
         // CSV rows: path, username, date
         let [path, creator, modified] = row;
 
@@ -111,19 +298,7 @@ const getMedia = async () => {
         const {name, keywords} = readableFilename(path);
         const url = `${baseUrl}${path}`;
 
-        const currentId = media.length;
-        // console.log({currentId, type, name, keywords, url, modified, creator})
-
-        // Add each keyword to the global keywords list
-        keywords.forEach(keyword => {
-            if (globalKeywords[keyword] === undefined) {
-                globalKeywords[keyword] = [];
-            }
-
-            globalKeywords[keyword].push(currentId);
-        });
-
-        media.push({
+        globalMediaElements.push({
             type,
             name,
             keywords,
@@ -133,8 +308,31 @@ const getMedia = async () => {
         });
     });
 
-    media.sort((a, b) => new Date(b.modified) - new Date(a.modified))
-    return media;
+    globalMediaElements.sort((a, b) => new Date(b.modified) - new Date(a.modified))
+
+    globalMediaElements.forEach((media, index) => {
+        // Add each keyword to the global keywords list
+        media.keywords.forEach(keyword => {
+            if (globalKeywords[keyword] === undefined) {
+                globalKeywords[keyword] = [];
+
+                addToSearchTrees(keyword, searchTrees.keywordStart, searchTrees.keywordEnd);
+            }
+
+            globalKeywords[keyword].push(index);
+        });
+
+        // Add username to global list
+        alphanum(media.creator).forEach(part => {
+            if (globalUsernames[part] === undefined) {
+                globalUsernames[part] = [];
+
+                addToSearchTrees(part, searchTrees.usernameStart, searchTrees.usernameEnd);
+            }
+
+            globalUsernames[part].push(index);
+        });
+    })
 }
 
 const closeMedia = () => {
@@ -176,6 +374,8 @@ const openMedia = (media) => {
 
     mediaOpened = Date.now();
 }
+
+
 
 const getMediaElement = (item, playable) => {
     let elements = [];
@@ -225,6 +425,32 @@ const getMediaElement = (item, playable) => {
     return elements;
 }
 
+const getDescriptionElement = (item) => {
+    const description = document.createElement('div');
+    description.classList.add('media-description');
+
+    const title = document.createElement('h2');
+    title.innerText = item.name;
+    description.appendChild(title);
+
+    const creator = document.createElement('p');
+    creator.innerText = item.creator;
+    description.appendChild(creator);
+
+    return description;
+}
+
+const useMedia = (medias, query) => {
+    if (searchQuery === query) {
+        // Already displaying the same query
+        return;
+    }
+
+    createMediaElements(medias.slice(0, mediaCount));
+    mediaElements = medias.slice(mediaCount);
+    searchQuery = query;
+}
+
 const createMediaElements = (media) => {
     if (creatingMedia) return;
     creatingMedia = true;
@@ -241,6 +467,9 @@ const createMediaElements = (media) => {
             medias.forEach(element => mediaElement.appendChild(element));
             mediaContainer.appendChild(mediaElement);
         }
+
+        const description = getDescriptionElement(item);
+        mediaElement.appendChild(description);
     });
 
     creatingMedia = false;
@@ -270,11 +499,18 @@ document.querySelector('#open-card').addEventListener('click', (event) => {
     }
 });
 
-getMedia().then((media) => {
+document.getElementById('search').addEventListener('input', debounce((event) => {
+    const query = event.target.value;
+    console.log('Search:', query);
+    const results = search(query);
+    document.getElementById('media-elements').innerHTML = '';
+    useMedia(results, query);
+}, debounceTime));
+
+getMedia().then(() => {
     document.getElementById('loading').remove();
     document.getElementById('media-elements').classList.remove('loading');
-    createMediaElements(media.slice(0, mediaCount));
-    mediaElements = media.slice(mediaCount);
+    useMedia(globalMediaElements, '');
 }).catch((error) => {
     console.error('Error fetching media:', error);
     document.getElementById('loading').innerText = 'Not workingz :(';
